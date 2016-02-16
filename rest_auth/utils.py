@@ -1,5 +1,5 @@
 from six import string_types
-from django.utils.importlib import import_module
+from importlib import import_module
 
 
 def import_callable(path_or_callable):
@@ -10,3 +10,7 @@ def import_callable(path_or_callable):
         package, attr = path_or_callable.rsplit('.', 1)
         return getattr(import_module(package), attr)
 
+
+def default_create_token(token_model, user, serializer):
+    token, _ = token_model.objects.get_or_create(user=user)
+    return token

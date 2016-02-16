@@ -1,82 +1,91 @@
-from django.http import HttpRequest
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.permissions import AllowAny
+from rest_framework.generics import CreateAPIView
 from rest_framework import status
+from rest_framework.exceptions import MethodNotAllowed
 
-from allauth.account.views import SignupView, ConfirmEmailView
+from allauth.account.views import ConfirmEmailView
 from allauth.account.utils import complete_signup
-from allauth.account import app_settings
+from allauth.account import app_settings as allauth_settings
 
-from rest_auth.app_settings import UserDetailsSerializer
-from rest_auth.registration.serializers import SocialLoginSerializer
-from rest_auth.views import Login
-
-
-class Register(APIView, SignupView):
-
-    permission_classes = (AllowAny,)
-    user_serializer_class = UserDetailsSerializer
-    allowed_methods = ('POST', 'OPTIONS', 'HEAD')
-
-    def get(self, *args, **kwargs):
-        return Response({}, status=status.HTTP_405_METHOD_NOT_ALLOWED)
-
-    def put(self, *args, **kwargs):
-        return Response({}, status=status.HTTP_405_METHOD_NOT_ALLOWED)
-
-    def form_valid(self, form):
-        self.user = form.save(self.request)
-        if isinstance(self.request, HttpRequest):
-            request = self.request
-        else:
-            request = self.request._request
-        return complete_signup(request, self.user,
-                               app_settings.EMAIL_VERIFICATION,
-                               self.get_success_url())
-
-    def post(self, request, *args, **kwargs):
-        self.initial = {}
-        self.request.POST = self.request.DATA.copy()
-        form_class = self.get_form_class()
-        self.form = self.get_form(form_class)
-        if self.form.is_valid():
-            self.form_valid(self.form)
-            return self.get_response()
-        else:
-            return self.get_response_with_errors()
-
-    def get_response(self):
-        serializer = self.user_serializer_class(instance=self.user)
-        return Response(serializer.data, status=status.HTTP_201_CREATED)
-
-    def get_response_with_errors(self):
-        return Response(self.form.errors, status=status.HTTP_400_BAD_REQUEST)
+from rest_auth.app_settings import (TokenSerializer,
+                                    create_token)
+from rest_auth.registration.serializers import (SocialLoginSerializer,
+                                                VerifyEmailSerializer)
+from rest_auth.views import LoginView
+from rest_auth.models import TokenModel
+from .app_settings import RegisterSerializer
 
 
-class VerifyEmail(APIView, ConfirmEmailView):
+class RegisterView(CreateAPIView):
+    serializer_class = RegisterSerializer
+    permission_classes = (AllowAny, )
+    token_model = TokenModel
+
+    def get_response_data(self, user):
+        if allauth_settings.EMAIL_VERIFICATION == \
+                allauth_settings.EmailVerificationMethod.MANDATORY:
+            return {}
+
+        return TokenSerializer(user.auth_token).data
+
+    def create(self, request, *args, **kwargs):
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        user = self.perform_create(serializer)
+        headers = self.get_success_headers(serializer.data)
+
+        return Response(self.get_response_data(user), status=status.HTTP_201_CREATED, headers=headers)
+
+    def perform_create(self, serializer):
+        user = serializer.save(self.request)
+        create_token(self.token_model, user, serializer)
+        complete_signup(self.request._request, user,
+                        allauth_settings.EMAIL_VERIFICATION,
+                        None)
+        return user
+
+
+class VerifyEmailView(APIView, ConfirmEmailView):
 
     permission_classes = (AllowAny,)
     allowed_methods = ('POST', 'OPTIONS', 'HEAD')
 
     def get(self, *args, **kwargs):
-        return Response({}, status=status.HTTP_405_METHOD_NOT_ALLOWED)
+        raise MethodNotAllowed('GET')
 
     def post(self, request, *args, **kwargs):
-        self.kwargs['key'] = self.request.DATA.get('key', '')
+        serializer = VerifyEmailSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        self.kwargs['key'] = serializer.validated_data['key']
         confirmation = self.get_object()
         confirmation.confirm(self.request)
         return Response({'message': 'ok'}, status=status.HTTP_200_OK)
 
 
-class SocialLogin(Login):
+class SocialLoginView(LoginView):
     """
     class used for social authentications
-    example usage for facebook
-
+    example usage for facebook with access_token
+    -------------
     from allauth.socialaccount.providers.facebook.views import FacebookOAuth2Adapter
-    class FacebookLogin(SocialLogin):
+
+    class FacebookLogin(SocialLoginView):
         adapter_class = FacebookOAuth2Adapter
+    -------------
+
+    example usage for facebook with code
+
+    -------------
+    from allauth.socialaccount.providers.facebook.views import FacebookOAuth2Adapter
+    from allauth.socialaccount.providers.oauth2.client import OAuth2Client
+
+    class FacebookLogin(SocialLoginView):
+        adapter_class = FacebookOAuth2Adapter
+         client_class = OAuth2Client
+         callback_url = 'localhost:8000'
+    -------------
     """
 
     serializer_class = SocialLoginSerializer
